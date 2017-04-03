@@ -3,14 +3,16 @@ package win
 import (
 	"syscall"
 	"unsafe"
-	"errors"
+	"github.com/y4v8/errors"
 )
 
 var (
-	modKernel32                       = syscall.NewLazyDLL("kernel32.dll")
-	procGetVolumeInformationByHandleW = modKernel32.NewProc("GetVolumeInformationByHandleW")
-	procOpenFileById                  = modKernel32.NewProc("OpenFileById")
-	procGetFileInformationByHandleEx  = modKernel32.NewProc("GetFileInformationByHandleEx")
+	modKernel32                          = syscall.NewLazyDLL("kernel32.dll")
+	procGetVolumeInformationByHandleW    = modKernel32.NewProc("GetVolumeInformationByHandleW")
+	procOpenFileById                     = modKernel32.NewProc("OpenFileById")
+	procGetFileInformationByHandleEx     = modKernel32.NewProc("GetFileInformationByHandleEx")
+	procGetVolumePathName                = modKernel32.NewProc("GetVolumePathNameW")
+	procGetVolumeNameForVolumeMountPoint = modKernel32.NewProc("GetVolumeNameForVolumeMountPointW")
 )
 
 // Represents an update sequence number (USN) change journal, its records,
@@ -52,7 +54,7 @@ type USN_JOURNAL_DATA_V2 struct {
 // the FSCTL_QUERY_USN_JOURNAL and FSCTL_READ_USN_JOURNAL control codes.
 type READ_USN_JOURNAL_DATA_V0 struct {
 	StartUsn          uint64
-	ReasonMask        uint32
+	ReasonMask        ReasonMask
 	ReturnOnlyOnClose uint32
 	Timeout           uint64
 	BytesToWaitFor    uint64
@@ -100,7 +102,7 @@ type USN_RECORD_V2 struct {
 	ParentFileReferenceNumber uint64
 	USN                       uint64
 	TimeStamp                 uint64
-	Reason                    uint32
+	Reason                    ReasonMask
 	SourceInfo                uint32
 	SecurityId                uint32
 	FileAttributes            uint32
@@ -110,7 +112,7 @@ type USN_RECORD_V2 struct {
 }
 
 func (r *USN_RECORD_V2) FileName() string {
-	return syscall.UTF16ToString(r.fileName[0: r.FileNameLength/2])
+	return syscall.UTF16ToString(r.fileName[0:r.FileNameLength/2])
 }
 
 type uint128 struct {
@@ -280,9 +282,13 @@ const (
 	// and is of a lesser than or equal ordinal value to the requested file
 	// reference number.
 	FSCTL_GET_NTFS_FILE_RECORD = 9<<16 | 26<<2 // 589928
+)
 
+type ReasonMask uint32
+
+const (
 	// Data in the file or directory is overwritten.
-	USN_REASON_DATA_OVERWRITE = 0x00000001
+	USN_REASON_DATA_OVERWRITE ReasonMask = 0x00000001
 
 	// The file or directory is added to.
 	USN_REASON_DATA_EXTEND = 0x00000002
@@ -368,7 +374,7 @@ const (
 )
 
 // The list of short names for USN reason code flags.
-var UsnReason = map[uint32]string{
+var ReasonNames = map[ReasonMask]string{
 	USN_REASON_DATA_OVERWRITE:        "DATA_OVERWRITE",
 	USN_REASON_DATA_EXTEND:           "DATA_EXTEND",
 	USN_REASON_DATA_TRUNCATION:       "DATA_TRUNCATION",
@@ -395,6 +401,12 @@ var UsnReason = map[uint32]string{
 }
 
 const (
+	// For a directory, the right to list the contents of the directory.
+	FILE_LIST_DIRECTORY = 1
+
+	// The right to read file attributes.
+	FILE_READ_ATTRIBUTES = 0x80
+
 	// The file name should be retrieved. Used for any handles.
 	// Use only when calling GetFileInformationByHandleEx. See FILE_NAME_INFO.
 	FILE_NAME_INFO_BY_HANDLE = 2
@@ -406,18 +418,34 @@ func GetFileNameByID(hVolume syscall.Handle, fileID uint64) (string, error) {
 	fd.DwSize = uint32(unsafe.Sizeof(fd))
 	fd.FileId = fileID
 
-	h, err := OpenFileById(hVolume, &fd, syscall.GENERIC_READ, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE, nil, 0)
+	h, err := OpenFileById(hVolume,
+		&fd,
+		0,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
+		nil,
+		syscall.FILE_FLAG_BACKUP_SEMANTICS)
 	if err != nil {
-		return "", err
+		return "", errors.Wrap(err)
 	}
 	defer syscall.CloseHandle(h)
 
 	fileNameInfo := FILE_NAME_INFO{}
 	sizeFileNameInfo := uint32(unsafe.Sizeof(fileNameInfo))
 	err = GetFileInformationByHandleEx(h, FILE_NAME_INFO_BY_HANDLE, unsafe.Pointer(&fileNameInfo), sizeFileNameInfo)
-	if err != nil {
-		return "", err
+	if err == syscall.ERROR_MORE_DATA {
+
+		sizeFileNameInfo = (4 + fileNameInfo.FileNameLength) / 2
+		buf := make([]uint16, sizeFileNameInfo)
+		err = GetFileInformationByHandleEx(h, FILE_NAME_INFO_BY_HANDLE, unsafe.Pointer(&buf[0]), sizeFileNameInfo*2)
+
+		if err == nil {
+			return syscall.UTF16ToString(buf[2: 2+fileNameInfo.FileNameLength/2]), nil
+		}
 	}
+	if err != nil {
+		return "", errors.Wrap(err)
+	}
+
 	return syscall.UTF16ToString(fileNameInfo.FileName[0: fileNameInfo.FileNameLength/2]), nil
 }
 
@@ -438,31 +466,6 @@ func IsSupportedUsnJournal(hFile syscall.Handle) (bool, error) {
 	return lpFileSystemFlags&FILE_SUPPORTS_USN_JOURNAL != 0, nil
 }
 
-// Opens the volume to read the USN journal.
-func OpenVolume(volume string) (syscall.Handle, error) {
-	pString, err := syscall.UTF16PtrFromString(volume)
-	if err != nil {
-		return 0, err
-	}
-
-	hFile, err := syscall.CreateFile(pString,
-		syscall.GENERIC_READ, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE,
-		nil, syscall.OPEN_EXISTING,
-		syscall.FILE_FLAG_BACKUP_SEMANTICS|syscall.FILE_FLAG_OVERLAPPED, 0)
-	if err != nil {
-		return 0, err
-	}
-
-	if supported, err := IsSupportedUsnJournal(hFile); !supported {
-		syscall.CloseHandle(hFile)
-		if err != nil {
-			return 0, err
-		}
-		return 0, errors.New("USN is not supported")
-	}
-	return hFile, nil
-}
-
 func GetUsnJournalData(hFile syscall.Handle) (*USN_JOURNAL_DATA_V2, error) {
 	var bytesReturned uint32
 	var ujd USN_JOURNAL_DATA_V2
@@ -470,4 +473,28 @@ func GetUsnJournalData(hFile syscall.Handle) (*USN_JOURNAL_DATA_V2, error) {
 		(*byte)(unsafe.Pointer(&ujd)), uint32(unsafe.Sizeof(ujd)), &bytesReturned, nil)
 
 	return &ujd, err
+}
+
+func GetVolumePathName(filename *uint16, pathname *uint16, length uint32) (err error) {
+	r1, _, e1 := syscall.Syscall(procGetVolumePathName.Addr(), 3, uintptr(unsafe.Pointer(filename)), uintptr(unsafe.Pointer(pathname)), uintptr(length))
+	if r1 == 0 {
+		if e1 != 0 {
+			err = error(e1)
+		} else {
+			err = syscall.EINVAL
+		}
+	}
+	return
+}
+
+func GetVolumeNameForVolumeMountPoint(volumeMountPoint *uint16, volumeName *uint16, length uint32) (err error) {
+	r1, _, e1 := syscall.Syscall(procGetVolumeNameForVolumeMountPoint.Addr(), 3, uintptr(unsafe.Pointer(volumeMountPoint)), uintptr(unsafe.Pointer(volumeName)), uintptr(length))
+	if r1 == 0 {
+		if e1 != 0 {
+			err = error(e1)
+		} else {
+			err = syscall.EINVAL
+		}
+	}
+	return
 }
