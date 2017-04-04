@@ -1,15 +1,15 @@
 package filewatcher
 
 import (
-	"syscall"
 	"github.com/y4v8/errors"
 	"strings"
+	"syscall"
 )
 
 type action uint32
 
 const (
-	actionAdd    action = iota
+	actionAdd action = iota
 	actionRemove
 )
 

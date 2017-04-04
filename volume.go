@@ -1,9 +1,9 @@
 package filewatcher
 
 import (
-	"syscall"
 	"github.com/y4v8/errors"
 	"github.com/y4v8/filewatcher/win"
+	"syscall"
 )
 
 const (
@@ -20,7 +20,7 @@ type volume struct {
 	buffer  []byte
 }
 
-func newVolume(path string, mask win.ReasonMask) (*volume, error) {
+func newVolume(path string, mask win.UsnReason) (*volume, error) {
 	hVolume, err := openVolume(path)
 	if err != nil {
 		return nil, errors.Wrap(err)

@@ -1,11 +1,11 @@
 package filewatcher
 
 import (
-	"syscall"
-	"unsafe"
 	"github.com/y4v8/errors"
 	"github.com/y4v8/filewatcher/win"
 	"strings"
+	"syscall"
+	"unsafe"
 )
 
 const (
@@ -16,17 +16,16 @@ const (
 
 type Event struct {
 	Name   string
-	Reason win.ReasonMask
+	Reason win.UsnReason
 }
 
 type watcher struct {
-	events chan Event
-
 	port       syscall.Handle
+	reasonMask win.UsnReason
 	volumes    volumes
-	reasonMask win.ReasonMask
-
-	action chan watchAction
+	events     chan Event
+	action     chan watchAction
+	done       chan bool
 }
 
 func NewWatcher(events chan Event) (*watcher, error) {
@@ -36,11 +35,12 @@ func NewWatcher(events chan Event) (*watcher, error) {
 	}
 
 	w := &watcher{
-		events:     events,
 		port:       port,
-		volumes:    make(volumes),
 		reasonMask: 0xFFFFFFFF,
+		volumes:    make(volumes),
+		events:     events,
 		action:     make(chan watchAction, 16),
+		done:       make(chan bool),
 	}
 
 	// TODO mask
@@ -85,29 +85,26 @@ func (w *watcher) Close() error {
 		return errors.Wrap(err)
 	}
 
-	return nil
-}
+	<-w.done
 
-func (w *watcher) Start() error {
-	w.loop()
-
-	var err error
+	err = nil
 	for _, v := range w.volumes {
 		err = errors.Wrap(err, syscall.CloseHandle(v.handle))
 	}
 	return errors.Wrap(err, syscall.CloseHandle(w.port))
 }
 
-func (w *watcher) loop() {
+func (w *watcher) Start() {
 	var n, key uint32
 	var ov *syscall.Overlapped
 	var err error
 
+loop:
 	for {
 		err = syscall.GetQueuedCompletionStatus(w.port, &n, &key, &ov, syscall.INFINITE)
 		switch {
 		case key == keyQuit:
-			return
+			break loop
 		case key == keyChange:
 			err = w.changeHandler()
 		case err != nil:
@@ -116,6 +113,8 @@ func (w *watcher) loop() {
 			err = w.systemHandler(n, ov)
 		}
 	}
+
+	close(w.done)
 }
 
 func (w *watcher) systemHandler(n uint32, ov *syscall.Overlapped) (err error) {
@@ -133,7 +132,7 @@ func (w *watcher) systemHandler(n uint32, ov *syscall.Overlapped) (err error) {
 
 	begin := unsafe.Pointer(&v.buffer[0])
 
-	nextUSN := *(*uint64)( begin )
+	nextUSN := *(*uint64)(begin)
 	if nextUSN == v.urd.StartUsn {
 		return errors.New("nextUSN eq startUSN")
 	}
@@ -143,7 +142,7 @@ func (w *watcher) systemHandler(n uint32, ov *syscall.Overlapped) (err error) {
 	max := pos + uintptr(n)
 loop:
 	for pos += 8; pos < max; pos += uintptr(usnRecord.RecordLength) {
-		usnRecord = (*win.USN_RECORD_V2)( unsafe.Pointer(pos) )
+		usnRecord = (*win.USN_RECORD_V2)(unsafe.Pointer(pos))
 
 		name, err = win.GetFileNameByID(v.handle, usnRecord.FileReferenceNumber)
 		if err != nil {

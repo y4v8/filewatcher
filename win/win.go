@@ -1,9 +1,9 @@
 package win
 
 import (
+	"github.com/y4v8/errors"
 	"syscall"
 	"unsafe"
-	"github.com/y4v8/errors"
 )
 
 var (
@@ -54,7 +54,7 @@ type USN_JOURNAL_DATA_V2 struct {
 // the FSCTL_QUERY_USN_JOURNAL and FSCTL_READ_USN_JOURNAL control codes.
 type READ_USN_JOURNAL_DATA_V0 struct {
 	StartUsn          uint64
-	ReasonMask        ReasonMask
+	ReasonMask        UsnReason
 	ReturnOnlyOnClose uint32
 	Timeout           uint64
 	BytesToWaitFor    uint64
@@ -102,7 +102,7 @@ type USN_RECORD_V2 struct {
 	ParentFileReferenceNumber uint64
 	USN                       uint64
 	TimeStamp                 uint64
-	Reason                    ReasonMask
+	Reason                    UsnReason
 	SourceInfo                uint32
 	SecurityId                uint32
 	FileAttributes            uint32
@@ -112,7 +112,7 @@ type USN_RECORD_V2 struct {
 }
 
 func (r *USN_RECORD_V2) FileName() string {
-	return syscall.UTF16ToString(r.fileName[0:r.FileNameLength/2])
+	return syscall.UTF16ToString(r.fileName[0 : r.FileNameLength/2])
 }
 
 type uint128 struct {
@@ -284,11 +284,11 @@ const (
 	FSCTL_GET_NTFS_FILE_RECORD = 9<<16 | 26<<2 // 589928
 )
 
-type ReasonMask uint32
+type UsnReason uint32
 
 const (
 	// Data in the file or directory is overwritten.
-	USN_REASON_DATA_OVERWRITE ReasonMask = 0x00000001
+	USN_REASON_DATA_OVERWRITE UsnReason = 0x00000001
 
 	// The file or directory is added to.
 	USN_REASON_DATA_EXTEND = 0x00000002
@@ -374,7 +374,7 @@ const (
 )
 
 // The list of short names for USN reason code flags.
-var ReasonNames = map[ReasonMask]string{
+var UsnReasonNames = map[UsnReason]string{
 	USN_REASON_DATA_OVERWRITE:        "DATA_OVERWRITE",
 	USN_REASON_DATA_EXTEND:           "DATA_EXTEND",
 	USN_REASON_DATA_TRUNCATION:       "DATA_TRUNCATION",
@@ -439,14 +439,14 @@ func GetFileNameByID(hVolume syscall.Handle, fileID uint64) (string, error) {
 		err = GetFileInformationByHandleEx(h, FILE_NAME_INFO_BY_HANDLE, unsafe.Pointer(&buf[0]), sizeFileNameInfo*2)
 
 		if err == nil {
-			return syscall.UTF16ToString(buf[2: 2+fileNameInfo.FileNameLength/2]), nil
+			return syscall.UTF16ToString(buf[2 : 2+fileNameInfo.FileNameLength/2]), nil
 		}
 	}
 	if err != nil {
 		return "", errors.Wrap(err)
 	}
 
-	return syscall.UTF16ToString(fileNameInfo.FileName[0: fileNameInfo.FileNameLength/2]), nil
+	return syscall.UTF16ToString(fileNameInfo.FileName[0 : fileNameInfo.FileNameLength/2]), nil
 }
 
 // Checks the USN journal support for the volume.
